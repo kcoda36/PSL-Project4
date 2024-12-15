@@ -4,4 +4,4 @@ numpy
 Pillow
 streamlit
 chardet
-python-scipy
+scipy
