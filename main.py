@@ -2,10 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
-import pickle
 from PIL import Image
+from scipy.sparse import load_npz
 
-
+# -----------------------------------
+# Load Movies Data
+# -----------------------------------
 def load_movies(movies_file):
     """Load movies.dat and return a DataFrame."""
     encoding = detect_encoding(movies_file)
@@ -19,11 +21,6 @@ def load_movies(movies_file):
     )
     return movies
 
-def load_similarity_matrix(similarity_file):
-    """Load the similarity matrix from a pickle file."""
-    with open(similarity_file, 'rb') as f:
-        S = pickle.load(f)
-    return S
 
 def detect_encoding(file_path, num_bytes=10000):
     """Detect file encoding using chardet."""
@@ -33,28 +30,53 @@ def detect_encoding(file_path, num_bytes=10000):
     result = chardet.detect(raw_data)
     return result['encoding']
 
-def myIBCF(newuser_ratings, S_matrix, top_n=10):
 
+# -----------------------------------
+# Load Similarity Matrix
+# -----------------------------------
+def load_similarity_matrix(similarity_file):
+    """Load the similarity matrix from an NPZ file as a CSR matrix."""
+    S = load_npz(similarity_file)
+    return S
+
+
+@st.cache_data
+def load_data():
+    """Load movie data and similarity matrix."""
+    movies_file = './ml-1m/movies.dat'
+    similarity_file = './similarity_matrix_top30.npz'
+
+    # load movies
+    movies = load_movies(movies_file)
+
+    # load sparse similarity matrix
+    S = load_similarity_matrix(similarity_file)
+
+    return movies, S
+
+
+# -----------------------------------
+# IBCF Algorithm
+# -----------------------------------
+def myIBCF(newuser_ratings, S_matrix, top_n=10):
     prediction_scores = {}
 
-    # Iterate over each movie to predict
-    for movie in S_matrix.index:
-        # Safely get the user's rating for the movie; default to NaN if not rated
-        user_rating = newuser_ratings.get(movie, np.nan)
-        
+    for movie_idx in range(S_matrix.shape[0]):
+        user_rating = newuser_ratings.get(movie_idx, np.nan)
+
         if pd.isna(user_rating):
-            # Get similarity scores for movie i
-            S_i = S_matrix.loc[movie].dropna()
+            # Get similarity scores for movie as a sparse row
+            S_i = S_matrix.getrow(movie_idx).toarray().flatten()
 
             # Find movies rated by the user
             rated_movies = newuser_ratings[newuser_ratings.notna()].index
 
             # Intersection with movies rated by the user
-            relevant_similarities = S_i[S_i.index.isin(rated_movies)]
+            relevant_similarities = pd.Series(S_i, index=range(len(S_i))).loc[rated_movies]
 
             if not relevant_similarities.empty:
                 # Extract user's ratings for these movies
-                user_ratings = newuser_ratings[relevant_similarities.index]
+                user_ratings = newuser_ratings.loc[relevant_similarities.index]
 
                 # Compute the weighted sum
                 numerator = (relevant_similarities * user_ratings).sum()
@@ -62,24 +84,24 @@ def myIBCF(newuser_ratings, S_matrix, top_n=10):
 
                 if denominator != 0:
                     prediction = numerator / denominator
-                    prediction_scores[movie] = prediction
+                    prediction_scores[movie_idx] = prediction
                 else:
-                    prediction_scores[movie] = np.nan
+                    prediction_scores[movie_idx] = np.nan
             else:
-                prediction_scores[movie] = np.nan
+                prediction_scores[movie_idx] = np.nan
 
     predictions = pd.Series(prediction_scores)
-
     predictions = predictions.dropna()
-
     sorted_predictions = predictions.sort_values(ascending=False)
-
     top_recommendations = sorted_predictions.head(top_n).index.tolist()
-
     recommendations = ['m' + str(movie_id) for movie_id in top_recommendations]
 
     return recommendations
 
+
+# -----------------------------------
+# Display Recommendations
+# -----------------------------------
 def display_recommendations(recommendations, movies_df, images_folder):
     """Display recommended movies with their titles and poster images."""
     st.subheader("Top 10 Movie Recommendations:")
@@ -117,33 +139,18 @@ def display_recommendations(recommendations, movies_df, images_folder):
     st.markdown("---")
 
 
-
-@st.cache_data  
-def load_data():
-    movies_file = './ml-1m/movies.dat'
-    similarity_file = './similarity_matrix_top30.pkl'
-
-    # load movies
-    movies = load_movies(movies_file)
-
-    # load  matrix
-    S = load_similarity_matrix(similarity_file)
-
-    return movies, S
-
+# -----------------------------------
+# Main Streamlit App
+# -----------------------------------
 movies_df, similarity_matrix = load_data()
 
-
-
-# We went with 5 movies to rank. this could be any number though
-sample_movie_ids = similarity_matrix.index.tolist()[:5]
+# We went with 5 movies to rank. This could be any number though.
+sample_movie_ids = list(range(5))  # Select the first 5 movies for simplicity
 sample_movies = movies_df[movies_df['MovieID'].isin(sample_movie_ids)]
-
 
 st.title("Movie Recommender System: Item-Based Collaborative Filtering")
 
-st.markdown("""
-Please rank at least one movie to get reccomendations""")
+st.markdown("Please rate at least one movie to get recommendations.")
 
 # Display sample movies with rating sliders
 st.subheader("Rate These Sample Movies:")
@@ -156,6 +163,7 @@ with st.form(key='rating_form'):
     for idx, row in sample_movies.iterrows():
         movie_id = row['MovieID']
         title = row['Title']
+        
         # Display each movie with a slider for rating
         user_input = st.slider(
             label=title,
@@ -173,11 +181,11 @@ with st.form(key='rating_form'):
 if submit_button:
     user_ratings_series = pd.Series(user_ratings)
 
-    # error handling if user forgets to select a rating
+    # Error handling if user forgets to select a rating
     if user_ratings_series.isna().all():
         st.warning("Please rate at least one movie to receive recommendations.")
     else:
-        # run the myIBCF function
+        # Run the IBCF function
         recommendations = myIBCF(
             newuser_ratings=user_ratings_series,
             S_matrix=similarity_matrix,
@@ -186,5 +194,3 @@ if submit_button:
 
         # Display recommendations
         display_recommendations(recommendations, movies_df, './MovieImages')
-
-
